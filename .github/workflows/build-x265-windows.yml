@@ -58,7 +58,10 @@ jobs:
           release_exists=false
           should_build=true
 
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null; then
             release_exists=true
             if [ "${FORCE:-false}" != "true" ]; then
               should_build=false
