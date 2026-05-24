@@ -1,0 +1,203 @@
+name: Build x265 Windows x64
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream x265 tag, for example 4.2. Empty means latest release."
+        required: false
+        type: string
+      force:
+        description: "Rebuild and replace release assets if the GitHub release already exists."
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "29 2 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: x265-windows-${{ github.event.inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    name: Resolve upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      source_url: ${{ steps.release.outputs.source_url }}
+      should_build: ${{ steps.release.outputs.should_build }}
+      release_exists: ${{ steps.release.outputs.release_exists }}
+    steps:
+      - name: Resolve target release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$(curl --fail --silent --show-error \
+              'https://api.github.com/repos/Multicorewareinc/x265/releases/latest' \
+              | jq -r '.tag_name')"
+          fi
+
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "Could not resolve an upstream x265 release tag." >&2
+            exit 1
+          fi
+
+          source_url="https://github.com/Multicorewareinc/x265/tree/${tag}"
+          release_exists=false
+          should_build=true
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            release_exists=true
+            if [ "${FORCE:-false}" != "true" ]; then
+              should_build=false
+            fi
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "source_url=$source_url"
+            echo "release_exists=$release_exists"
+            echo "should_build=$should_build"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Upstream tag: $tag"
+          echo "Release exists: $release_exists"
+          echo "Should build: $should_build"
+
+  build-windows:
+    name: Build Windows x64 package
+    needs: resolve-release
+    if: needs.resolve-release.outputs.should_build == 'true'
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout automation repository
+        uses: actions/checkout@v4
+
+      - name: Install NASM
+        run: |
+          choco install nasm -y --no-progress
+
+          $nasm = Get-Command nasm -ErrorAction SilentlyContinue
+          if ($null -eq $nasm) {
+            $candidates = @(
+              "${env:ProgramFiles}\NASM\nasm.exe",
+              "${env:ProgramFiles(x86)}\NASM\nasm.exe",
+              "C:\ProgramData\chocolatey\lib\nasm\tools\nasm.exe"
+            )
+
+            $nasmPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($null -eq $nasmPath) {
+              $nasmPath = Get-ChildItem -Path "${env:ProgramFiles}", "C:\ProgramData\chocolatey\lib\nasm" -Filter nasm.exe -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty FullName
+            }
+
+            if ($null -eq $nasmPath) {
+              Write-Error "NASM installed, but nasm.exe was not found."
+            }
+
+            $nasmDir = Split-Path $nasmPath -Parent
+            Add-Content $env:GITHUB_PATH $nasmDir
+            $env:Path = "$env:Path;$nasmDir"
+          }
+
+          nasm -v
+
+      - name: Clone x265 source
+        env:
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          git clone --branch $env:TAG --depth 1 https://github.com/Multicorewareinc/x265.git x265
+          git -C x265 rev-parse HEAD | Tee-Object -FilePath x265-commit.txt
+
+      - name: Build x265
+        run: |
+          cmake -S x265/source -B x265/build/windows-x64 -G "Visual Studio 17 2022" -A x64 -DENABLE_CLI=ON -DENABLE_SHARED=OFF
+          cmake --build x265/build/windows-x64 --config Release --target cli
+
+      - name: Package binaries
+        env:
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+          SOURCE_URL: ${{ needs.resolve-release.outputs.source_url }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $exe = Get-ChildItem -Path "x265/build/windows-x64" -Filter "x265.exe" -Recurse | Select-Object -First 1
+          if ($null -eq $exe) {
+            Write-Error "Expected encoder executable was not found: x265.exe"
+          }
+
+          $commit = (Get-Content x265-commit.txt -Raw).Trim()
+          $packageRoot = "artifacts/x265-$env:TAG-windows-x64"
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+          Copy-Item $exe.FullName $packageRoot
+
+          $exeDir = Split-Path $exe.FullName -Parent
+          Get-ChildItem -Path $exeDir -Include "*.dll", "*.pdb" -File -ErrorAction SilentlyContinue | Copy-Item -Destination $packageRoot -ErrorAction SilentlyContinue
+
+          @(
+            "x265 Windows x64 build"
+            "Upstream tag: $env:TAG"
+            "Upstream commit: $commit"
+            "Upstream source: $env:SOURCE_URL"
+            "Build OS: windows-2022"
+            "Build command: cmake -S x265/source -B x265/build/windows-x64 -G `"Visual Studio 17 2022`" -A x64 -DENABLE_CLI=ON -DENABLE_SHARED=OFF; cmake --build x265/build/windows-x64 --config Release --target cli"
+            "Built at UTC: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
+          ) | Set-Content -Encoding UTF8 "$packageRoot/BUILD_INFO.txt"
+
+          Compress-Archive -Path "$packageRoot/*" -DestinationPath "x265-$env:TAG-windows-x64.zip" -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: x265-${{ needs.resolve-release.outputs.tag }}-windows-x64
+          path: x265-${{ needs.resolve-release.outputs.tag }}-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+          SOURCE_URL: ${{ needs.resolve-release.outputs.source_url }}
+          RELEASE_EXISTS: ${{ needs.resolve-release.outputs.release_exists }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $asset = "x265-$env:TAG-windows-x64.zip"
+          $notes = @"
+          Automated Windows x64 build of official x265 $env:TAG.
+
+          Upstream source: $env:SOURCE_URL
+
+          Contents include x265.exe, related runtime files from the Release build, and BUILD_INFO.txt.
+          "@
+
+          if ($env:RELEASE_EXISTS -eq "true") {
+            gh release upload $env:TAG $asset --clobber
+          } else {
+            gh release create $env:TAG $asset --title "x265 $env:TAG Windows x64" --notes $notes
+          }
+
+  already-built:
+    name: Already built
+    needs: resolve-release
+    if: needs.resolve-release.outputs.should_build != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report skipped build
+        run: |
+          echo "GitHub release ${{ needs.resolve-release.outputs.tag }} already exists. Use workflow_dispatch force=true to rebuild."

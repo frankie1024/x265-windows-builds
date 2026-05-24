@@ -1,0 +1,6 @@
+.DS_Store
+*.zip
+*.7z
+*.log
+x265/
+artifacts/
