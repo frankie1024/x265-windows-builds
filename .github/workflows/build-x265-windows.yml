@@ -142,7 +142,7 @@ jobs:
           }
 
           $commit = (Get-Content x265-commit.txt -Raw).Trim()
-          $packageRoot = "artifacts/x265-$env:TAG-windows-x64"
+          $packageRoot = "artifacts/x265-$env:TAG-x64"
           New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
           Copy-Item $exe.FullName $packageRoot
 
@@ -159,13 +159,13 @@ jobs:
             "Built at UTC: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
           ) | Set-Content -Encoding UTF8 "$packageRoot/BUILD_INFO.txt"
 
-          Compress-Archive -Path "$packageRoot/*" -DestinationPath "x265-$env:TAG-windows-x64.zip" -Force
+          Compress-Archive -Path "$packageRoot/*" -DestinationPath "x265-$env:TAG-x64.zip" -Force
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: x265-${{ needs.resolve-release.outputs.tag }}-windows-x64
-          path: x265-${{ needs.resolve-release.outputs.tag }}-windows-x64.zip
+          name: x265-${{ needs.resolve-release.outputs.tag }}-x64
+          path: x265-${{ needs.resolve-release.outputs.tag }}-x64.zip
           if-no-files-found: error
 
       - name: Publish GitHub release
@@ -177,7 +177,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $asset = "x265-$env:TAG-windows-x64.zip"
+          $asset = "x265-$env:TAG-x64.zip"
           $notes = @"
           Automated Windows x64 build of official x265 $env:TAG.
 

@@ -18,7 +18,7 @@ Each GitHub release contains:
 The packaged archive name is:
 
 ```text
-x265-<tag>-windows-x64.zip
+x265-<version>-x64.zip
 ```
 
 ## Manual Build
