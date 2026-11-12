@@ -1,0 +1,80 @@
+name: Promote verified 4.3 multilib
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: promote-4.3-multilib
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check original validation run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $run = gh api repos/${{ github.repository }}/actions/runs/43147776097 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.conclusion -ne 'success' -or $run.head_sha -ne 'ad1d751cb8ce02e8a24618adc8d784449f32e3a8') {
+            throw 'The original multilib validation run does not match the reviewed build.'
+          }
+      - name: Retrieve original validated binary
+        uses: actions/download-artifact@v4
+        with:
+          name: x265-4.3-x64
+          run-id: 43147776097
+          github-token: ${{ github.token }}
+      - name: Migrate matching source and verify checksums
+        run: |
+          $binary = 'x265-4.3-x64.zip'
+          $source = 'x265-4.3-multilib-source-license.zip'
+          # One-time migration of the matching source archive, preserving its original bytes.
+          Invoke-WebRequest "https://github.com/frankie1024/FlowEncode/releases/download/v3.0.0/$source" -OutFile $source
+          $expected = @{
+            $binary = '499913e1e898b64078a795c9edcd0ea8805fe05417091ce9abad0572f70f0b3d'
+            $source = 'db428fc8cdba3110ead30155207e7e529fcaacf0a1f8fc5e23ea698092b83077'
+          }
+          foreach ($name in @($binary, $source)) {
+            if ((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash -ne $expected[$name]) {
+              throw "Checksum mismatch: $name"
+            }
+          }
+          @($binary, $source) | ForEach-Object { '{0} *{1}' -f $expected[$_], $_ } | Set-Content SHA256SUMS.txt -Encoding ascii
+          Expand-Archive $binary -DestinationPath verified-encoder
+      - name: Revalidate actual 8-bit and 10-bit output
+        run: |
+          Invoke-WebRequest 'https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build-shared.zip' -OutFile ffmpeg.zip
+          if ((Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash -ne '8d31e162f1616e37aab3fa2db991b97e1b8dbeb1c8465fd81a81be16ff91b328') { throw 'FFmpeg checksum mismatch' }
+          Expand-Archive ffmpeg.zip -DestinationPath validation-tools
+          $probe = (Get-ChildItem validation-tools -Recurse -Filter ffprobe.exe | Select-Object -First 1).FullName
+          $encoder = (Get-ChildItem verified-encoder -Recurse -Filter x265.exe | Select-Object -First 1).FullName
+          ./scripts/test-bit-depth.ps1 -Encoder $encoder -Ffprobe $probe
+      - name: Publish separate multilib release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          @'
+          ## 更新内容
+
+          - x265 4.3 Windows x64 multilib 修订包，支持 8 位和 10 位输出，修复旧包对 10 位请求静默退回 8 位的问题。
+          - 原始 CI 产物逐字节保留，重新验证实际 HEVC 格式、像素格式和解码帧数；附完整对应源码、构建脚本、许可证和 SHA256。
+          - x265 发布由本仓库独立维护；旧 4.3 发布不覆盖。编码器本身仍报告 4.3。
+
+          ## Update Notes
+
+          - Revised x265 4.3 Windows x64 multilib package supporting 8-bit and 10-bit output, fixing silent 8-bit fallback for 10-bit requests.
+          - Preserves the exact original CI archive and revalidates HEVC codec, pixel format and decoded frame count. Includes matching source, build scripts, licenses and SHA256 checksums.
+          - This repository owns x265 releases independently. The old 4.3 release is preserved; the encoder itself still reports 4.3.
+          '@ | Set-Content release-notes.md -Encoding utf8
+          gh release create 4.3-multilib.1 x265-4.3-x64.zip x265-4.3-multilib-source-license.zip SHA256SUMS.txt --target $env:GITHUB_SHA --title 'x265 4.3 Windows x64 multilib' --notes-file release-notes.md --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Publishing multilib release failed' }

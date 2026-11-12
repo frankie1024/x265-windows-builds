@@ -1,5 +1,11 @@
 # x265 Windows Builds
 
+The verified 8/10-bit correction for x265 4.3 is published as `4.3-multilib.1`.
+It preserves the original validated binary archive and includes a matching
+source/license bundle and SHA256 checksums. The older `4.3` release is retained.
+The `Promote verified 4.3 multilib` workflow performs the one-time migration and
+revalidates the actual output before publication.
+
 This repository builds Windows x64 executable packages from official
 [x265](https://github.com/Multicorewareinc/x265) releases.
 
