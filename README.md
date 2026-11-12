@@ -14,6 +14,7 @@ Each GitHub release contains:
 - `x265.exe`
 - related runtime files produced by the Release build
 - `BUILD_INFO.txt` with the source tag, commit, and build settings
+- `bit-depth-validation.json` recording actual 8-bit and 10-bit output verification
 
 The packaged archive name is:
 
@@ -36,12 +37,22 @@ The GitHub Actions job runs on `windows-2022` and uses the upstream CMake build:
 
 ```powershell
 git clone --branch <tag> --depth 1 https://github.com/Multicorewareinc/x265.git
-cmake -S x265/source -B x265/build/windows-x64 -G "Visual Studio 17 2022" -A x64 -DENABLE_CLI=ON -DENABLE_SHARED=OFF
-cmake --build x265/build/windows-x64 --config Release --target cli
+./scripts/build-multilib.ps1
 ```
 
 NASM is installed with Chocolatey before the build so assembly primitives are
-available.
+available. The build first creates a namespaced 10-bit static library, then
+links it into the 8-bit CLI with `LINKED_10BIT=ON`. Both output depths are tested
+with real Y4M samples and a SHA256-verified, pinned FFprobe 9.0.2. A successful
+exit code alone is insufficient: codec, pixel format, and decoded frame count
+must match before the package is uploaded or published.
+
+Pull requests always build and validate an artifact, even when that upstream
+release already exists. They never publish or replace release assets. Release
+publication runs in a separate job after validation for scheduled/manual runs.
+
+For local source-only validation without NASM, use `-DisableAssembly`; the
+release workflow keeps assembly enabled.
 
 ## Upstream Licenses
 

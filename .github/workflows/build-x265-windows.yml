@@ -1,6 +1,7 @@
 name: Build x265 Windows x64
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -16,7 +17,7 @@ on:
     - cron: "29 2 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: x265-windows-${{ github.event.inputs.tag || 'latest' }}
@@ -38,6 +39,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
           FORCE: ${{ github.event.inputs.force }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
@@ -63,7 +65,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null; then
             release_exists=true
-            if [ "${FORCE:-false}" != "true" ]; then
+            if [ "${FORCE:-false}" != "true" ] && [ "$EVENT_NAME" != "pull_request" ]; then
               should_build=false
             fi
           fi
@@ -129,8 +131,17 @@ jobs:
 
       - name: Build x265
         run: |
-          cmake -S x265/source -B x265/build/windows-x64 -G "Visual Studio 17 2022" -A x64 -DENABLE_CLI=ON -DENABLE_SHARED=OFF
-          cmake --build x265/build/windows-x64 --config Release --target cli
+          ./scripts/build-multilib.ps1
+
+      - name: Validate real 8-bit and 10-bit outputs
+        run: |
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build-shared.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg-stable.zip
+          $expected = "8d31e162f1616e37aab3fa2db991b97e1b8dbeb1c8465fd81a81be16ff91b328"
+          if ((Get-FileHash ffmpeg-stable.zip -Algorithm SHA256).Hash -ne $expected) { throw "FFmpeg archive SHA256 mismatch." }
+          Expand-Archive ffmpeg-stable.zip -DestinationPath validation-tools
+          $probe = Get-ChildItem validation-tools -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          ./scripts/test-bit-depth.ps1 -Encoder x265/build/windows-x64/Release/x265.exe -Ffprobe $probe.FullName
 
       - name: Package binaries
         env:
@@ -148,6 +159,7 @@ jobs:
           $packageRoot = "artifacts/x265-$env:TAG-x64"
           New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
           Copy-Item $exe.FullName $packageRoot
+          Copy-Item bit-depth-validation.json $packageRoot
 
           $exeDir = Split-Path $exe.FullName -Parent
           Get-ChildItem -Path $exeDir -Include "*.dll", "*.pdb" -File -ErrorAction SilentlyContinue | Copy-Item -Destination $packageRoot -ErrorAction SilentlyContinue
@@ -158,7 +170,8 @@ jobs:
             "Upstream commit: $commit"
             "Upstream source: $env:SOURCE_URL"
             "Build OS: windows-2022"
-            "Build command: cmake -S x265/source -B x265/build/windows-x64 -G `"Visual Studio 17 2022`" -A x64 -DENABLE_CLI=ON -DENABLE_SHARED=OFF; cmake --build x265/build/windows-x64 --config Release --target cli"
+            "Build command: scripts/build-multilib.ps1 (8-bit CLI + linked 10-bit static library, NASM enabled)"
+            "Validated output: HEVC yuv420p and yuv420p10le, 2 decoded frames each; see bit-depth-validation.json"
             "Built at UTC: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
           ) | Set-Content -Encoding UTF8 "$packageRoot/BUILD_INFO.txt"
 
@@ -171,9 +184,25 @@ jobs:
           path: x265-${{ needs.resolve-release.outputs.tag }}-x64.zip
           if-no-files-found: error
 
+  publish-release:
+    name: Publish validated package
+    needs: [resolve-release, build-windows]
+    if: github.event_name != 'pull_request'
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Download validated workflow artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: x265-${{ needs.resolve-release.outputs.tag }}-x64
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve-release.outputs.tag }}
           SOURCE_URL: ${{ needs.resolve-release.outputs.source_url }}
           RELEASE_EXISTS: ${{ needs.resolve-release.outputs.release_exists }}
@@ -186,7 +215,7 @@ jobs:
 
           Upstream source: $env:SOURCE_URL
 
-          Contents include x265.exe, related runtime files from the Release build, and BUILD_INFO.txt.
+          Contents include x265.exe, related runtime files, BUILD_INFO.txt, and bit-depth-validation.json. The multilib CLI supports 8-bit and 10-bit output.
           "@
 
           if ($env:RELEASE_EXISTS -eq "true") {
