@@ -4,3 +4,4 @@
 *.log
 x265/
 artifacts/
+bit-depth-validation.json
